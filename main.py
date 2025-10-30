@@ -212,23 +212,33 @@ async def extract_invoice(file: UploadFile = File(...)):
     content = await file.read()
     mime = file.content_type or "application/pdf"
 
+    # Forzar MIME si el archivo es PDF
+    if file.filename.lower().endswith('.pdf'):
+        mime = 'application/pdf'
+
     vertex_init(project=PROJECT_ID, location=LOCATION)
     model = GenerativeModel(MODEL_NAME)
 
     doc_part = Part.from_data(data=content, mime_type=mime)
     prompt = (
-        "You are an information extraction system for invoices. "
-        "Return ONLY a JSON object with exactly these keys: "
+        "You are an advanced invoice information extraction system. "
+        "You will receive a PDF file (which may contain text or scanned images). "
+        "Extract ONLY the following fields from the invoice and return a single JSON object: "
         '{"vendor": string|null, "invoice_date": string (YYYY-MM-DD)|null, '
-        '"total_amount": number|null, "currency": string|null, "invoice_number": string|null}.'
+        '"total_amount": number|null, "currency": string|null, "invoice_number": string|null}. '
+        "If the PDF contains images, use OCR to extract the text before analyzing. "
+        "Do not include any explanation, only the JSON object."
     )
     cfg = GenerationConfig(response_mime_type="application/json")
 
     try:
+        print("--- Starting Gemini extraction ---")
         resp = model.generate_content([prompt, doc_part], generation_config=cfg)
         text = getattr(resp, "text", "") or ""
+        print(f"Raw response from Gemini: {text}")
 
-        # Try direct JSON
+        # Limpiar respuesta antes de intentar cargar como JSON
+        cleaned_text = text.strip()
         data: Any
         try:
             data = json.loads(text)
