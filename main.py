@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 import google.auth
+# Import the service_account module to build credentials from the JSON content
+from google.oauth2 import service_account
 from google.auth.transport.requests import AuthorizedSession
 from google.api_core import exceptions as gax
 
@@ -23,10 +25,13 @@ PROJECT_ID = os.getenv("VERTEX_PROJECT", os.getenv("PROJECT_ID", "documind-47441
 LOCATION = os.getenv("VERTEX_LOCATION", os.getenv("LOCATION", "us-central1"))
 MODEL_NAME = os.getenv("VERTEX_MODEL", os.getenv("MODEL_NAME", "gemini-2.0-flash-001"))
 
+# This environment variable is used for production credentials (e.g., in Vercel)
+GOOGLE_CREDENTIALS_JSON_CONTENT = os.getenv("GOOGLE_CREDENTIALS_JSON_CONTENT")
+
 app = FastAPI(title="DocuMind – Vertex AI Diagnostics (REST)")
 
 # ---------- CORS MIDDLEWARE CONFIGURATION ----------
-# This is the "guest list" that allows the frontend to make requests.
+# This "guest list" allows the frontend to make requests.
 origins = [
     "http://localhost:5173",
 ]
@@ -35,17 +40,56 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"], # Allows all methods (GET, POST, etc.)
-    allow_headers=["*"], # Allows all headers.
+    allow_methods=["*"],  # Allows all methods (GET, POST, etc.)
+    allow_headers=["*"],  # Allows all headers.
 )
+
+
 # ----------------------------------------------------
+
+# --- Unified Credentials Helper Function ---
+def _get_credentials():
+    """
+    Get Google credentials.
+    In production (Vercel), read from GOOGLE_CREDENTIALS_JSON_CONTENT.
+    In development (local), use the GOOGLE_APPLICATION_CREDENTIALS file path.
+    """
+    if GOOGLE_CREDENTIALS_JSON_CONTENT:
+        # Running in production (Vercel)
+        try:
+            creds_info = json.loads(GOOGLE_CREDENTIALS_JSON_CONTENT)
+            return service_account.Credentials.from_service_account_info(creds_info)
+        except Exception as e:
+            print(f"Error loading credentials from env var: {e}")
+            return None
+    else:
+        # Running locally
+        # google.auth.default() will automatically use the GOOGLE_APPLICATION_CREDENTIALS path
+        try:
+            creds, _ = google.auth.default()
+            return creds
+        except Exception as e:
+            print(f"Error loading credentials from local ADC: {e}")
+            return None
+
+
+# ------------------------------------
+
 
 # ---------- HELPERS ----------
 def _get_authorized_session():
-    """Create an AuthorizedSession using ADC (respects GOOGLE_APPLICATION_CREDENTIALS)."""
+    """Create an AuthorizedSession using the unified credentials helper."""
     scopes = ["https://www.googleapis.com/auth/cloud-platform"]
-    creds, _ = google.auth.default(scopes=scopes)
+    creds = _get_credentials()
+
+    # The scopes must be added to the credentials
+    if creds and hasattr(creds, "with_scopes"):
+        creds = creds.with_scopes(scopes)
+
+    if not creds:
+        raise HTTPException(status_code=500, detail="Could not load Google credentials")
     return AuthorizedSession(creds)
+
 
 def _safe_text(resp):
     """Return JSON body if possible, otherwise raw text."""
@@ -56,6 +100,7 @@ def _safe_text(resp):
             return resp.text
         except Exception:
             return "<no-body>"
+
 
 def _first_json_object(s: str) -> Optional[str]:
     """Extract first top-level {...} JSON object; tolerates ```json fences or 'json' prefix."""
@@ -74,8 +119,9 @@ def _first_json_object(s: str) -> Optional[str]:
         elif ch == "}":
             depth -= 1
             if depth == 0:
-                return t[start : i + 1]
+                return t[start: i + 1]
     return None
+
 
 def _coerce_amount(v) -> Optional[float]:
     """Normalize numbers like '49,00' → 49.0."""
@@ -90,6 +136,7 @@ def _coerce_amount(v) -> Optional[float]:
         except ValueError:
             return None
     return None
+
 
 def _coerce_date_yyyy_mm_dd(s: Optional[str]) -> Optional[date]:
     """Accept 'dd.mm.yyyy' or 'yyyy-mm-dd' and return date."""
@@ -109,6 +156,7 @@ def _coerce_date_yyyy_mm_dd(s: Optional[str]) -> Optional[date]:
     except ValueError:
         return None
 
+
 # ---------- SCHEMAS ----------
 class InvoiceExtraction(BaseModel):
     vendor: Optional[str] = Field(None, description="Supplier or company name")
@@ -118,19 +166,23 @@ class InvoiceExtraction(BaseModel):
     invoice_number: Optional[str] = Field(None, description="Invoice number")
     rawText: Optional[str] = Field(None, description="Raw model output if parsing failed")
 
+
 # ---------- DIAGNOSTIC ENDPOINTS ----------
 @app.get("/health")
 def health():
     return {"project": PROJECT_ID, "location": LOCATION, "model": MODEL_NAME}
 
+
 @app.get("/whoami")
 def whoami():
     try:
-        creds, proj = google.auth.default()
+        # Use the helper for consistency
+        creds = _get_credentials()
         email = getattr(creds, "_service_account_email", None) or getattr(creds, "service_account_email", None)
-        return {"adc_project": proj, "sa_email": email}
+        return {"adc_project": PROJECT_ID, "sa_email": email}
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": type(e).__name__, "detail": str(e)})
+
 
 @app.get("/check-model")
 def check_model():
@@ -168,6 +220,7 @@ def check_model():
         detail={"error": "UPSTREAM_ERROR", "status_code": resp.status_code, "url": url, "response": _safe_text(resp)},
     )
 
+
 @app.get("/list-models")
 def list_models(prefix: Optional[str] = Query("gemini", description="Filter by name/displayName prefix")):
     session = _get_authorized_session()
@@ -181,7 +234,8 @@ def list_models(prefix: Optional[str] = Query("gemini", description="Filter by n
         url = base + (f"?pageToken={page_token}" if page_token else "")
         resp = session.get(url)
         if resp.status_code != 200:
-            raise HTTPException(status_code=resp.status_code, detail={"error": "UPSTREAM_ERROR", "response": _safe_text(resp)})
+            raise HTTPException(status_code=resp.status_code,
+                                detail={"error": "UPSTREAM_ERROR", "response": _safe_text(resp)})
         data = resp.json()
         for m in data.get("models", []):
             name = m.get("name", "")
@@ -193,10 +247,17 @@ def list_models(prefix: Optional[str] = Query("gemini", description="Filter by n
             break
     return {"project": PROJECT_ID, "location": LOCATION, "count": len(seen), "models": seen}
 
+
 @app.get("/ping-model")
 def ping_model():
     try:
-        vertex_init(project=PROJECT_ID, location=LOCATION)
+        # --- Initialization ---
+        creds = _get_credentials()
+        if not creds:
+            raise Exception("Could not load Google credentials for Vertex AI")
+        vertex_init(project=PROJECT_ID, location=LOCATION, credentials=creds)
+        # ----------------------
+
         model = GenerativeModel(MODEL_NAME)
         result = model.generate_content("Say 'pong' in one word.")
         return {"reply": getattr(result, "text", None)}
@@ -205,6 +266,7 @@ def ping_model():
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": type(e).__name__, "detail": str(e)})
 
+
 # ---------- BUSINESS ENDPOINT ----------
 @app.post("/invoices/extract", response_model=InvoiceExtraction)
 async def extract_invoice(file: UploadFile = File(...)):
@@ -212,33 +274,37 @@ async def extract_invoice(file: UploadFile = File(...)):
     content = await file.read()
     mime = file.content_type or "application/pdf"
 
-    # Forzar MIME si el archivo es PDF
-    if file.filename.lower().endswith('.pdf'):
-        mime = 'application/pdf'
+    # --- Initialization ---
+    # Initialize Vertex AI with the unified credentials helper
+    creds = _get_credentials()
+    if not creds:
+        raise HTTPException(status_code=500, detail="Could not load Google credentials for Vertex AI")
+    vertex_init(project=PROJECT_ID, location=LOCATION, credentials=creds)
+    # ----------------------
 
-    vertex_init(project=PROJECT_ID, location=LOCATION)
     model = GenerativeModel(MODEL_NAME)
 
     doc_part = Part.from_data(data=content, mime_type=mime)
     prompt = (
-        "You are an advanced invoice information extraction system. "
-        "You will receive a PDF file (which may contain text or scanned images). "
-        "Extract ONLY the following fields from the invoice and return a single JSON object: "
+        "You are an information extraction system for invoices. "
+        "Return ONLY a JSON object with exactly these keys: "
         '{"vendor": string|null, "invoice_date": string (YYYY-MM-DD)|null, '
-        '"total_amount": number|null, "currency": string|null, "invoice_number": string|null}. '
-        "If the PDF contains images, use OCR to extract the text before analyzing. "
-        "Do not include any explanation, only the JSON object."
+        '"total_amount": number|null, "currency": string|null, "invoice_number": string|null}.'
     )
     cfg = GenerationConfig(response_mime_type="application/json")
 
+    text = ""  # Initialize text variable to ensure it exists
     try:
-        print("--- Starting Gemini extraction ---")
-        resp = model.generate_content([prompt, doc_part], generation_config=cfg)
-        text = getattr(resp, "text", "") or ""
-        print(f"Raw response from Gemini: {text}")
+        print("--- Attempting to call model.generate_content ---")
+        try:
+            resp = model.generate_content([prompt, doc_part], generation_config=cfg)
+            text = getattr(resp, "text", "") or ""
+            print(f"Raw response from Gemini: {text}")
+        except Exception as e:
+            print(f"!!! GEMINI CALL FAILED: {type(e).__name__} - {e}")
+            raise
 
-        # Limpiar respuesta antes de intentar cargar como JSON
-        cleaned_text = text.strip()
+        # Try direct JSON
         data: Any
         try:
             data = json.loads(text)
@@ -264,12 +330,16 @@ async def extract_invoice(file: UploadFile = File(...)):
 
     except Exception as e:
         # Return raw text or error string to help debugging
+        print(f"--- Error during processing: {e} ---")
         try:
-            return InvoiceExtraction(rawText=text)  # type: ignore[name-defined]
+            return InvoiceExtraction(rawText=text)
         except Exception:
             return InvoiceExtraction(rawText=str(e))
 
+
 # ---------- MAIN ----------
+# This block is now only for local development and will be ignored by Vercel.
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
