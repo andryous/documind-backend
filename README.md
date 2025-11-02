@@ -22,7 +22,7 @@ An intelligent API for extracting structured data from invoices (PDF/Image) usin
 * **Data Validation:** Pydantic
 * **Deployment:** Vercel
 
-## ► Configuration
+## ► Configuration 
 
 This project requires environment variables to run.
 
