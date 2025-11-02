@@ -22,16 +22,44 @@ An intelligent API for extracting structured data from invoices (PDF/Image) usin
 * **Data Validation:** Pydantic
 * **Deployment:** Vercel
 
+## ► Configuration
+
+This project requires environment variables to run.
+
+### 1. Common Variables
+The following variables are required for **both** local development and production deployment.
+
+| Variable | Description | Example Value |
+| :--- | :--- | :--- |
+| `VERTEX_PROJECT` | The Google Cloud project ID. | `documind-474412` |
+| `VERTEX_LOCATION` | The region for the Vertex AI model. | `us-central1` |
+| `VERTEX_MODEL` | The name of the Gemini model to use. | `gemini-2.0-flash-001` |
+
+### 2. Environment-Specific Variables
+
+You must provide the correct variables based on where the app is running.
+
+**For Local Development (in a `.env` file):**
+```env
+# A placeholder path to the local Google Cloud credentials file.
+# This path is used by google.auth.default()
+GOOGLE_APPLICATION_CREDENTIALS="C:/path/to/credentials.json"
+```
+
+### For Production Deployment (in Vercel):
+
+GOOGLE_CREDENTIALS_JSON_CONTENT: (Crucial) Open the credentials.json file, copy its entire content (the full JSON object), and paste it as the value for this variable.
+
+FRONTEND_URL: (Required) The public URL of the deployed frontend (e.g., https://your-frontend-app.vercel.app).
+
 ## ► Local Development
+**1. Prerequisites:**  
+Python 3.11+  
+A Google Cloud project with the Vertex AI API enabled.  
+A Google Cloud Service Account credentials.json file (see Configuration above).
 
-### 1. Prerequisites
 
-* Python 3.11+
-* A Google Cloud project with the Vertex AI API enabled.
-* A Google Cloud Service Account `credentials.json` file.
-
-### 2. Clone & Install Dependencies
-
+**2. Clone and Install Dependencies**
 ```bash
 # Clone the repository
 git clone [https://github.com/andryous/documind-backend.git](https://github.com/andryous/documind-backend.git)
@@ -45,22 +73,8 @@ python -m venv .venv
 # Install dependencies from the clean requirements file
 pip install -r requirements.txt
 ```
-
-### 3. Environment Configuration
-This project requires a .env file for local development.
-Create a file named .env in the root of the project.
-
-Add the following variables (replace with your values):
-## Full path to your Google Cloud credentials file 
-## This path is used by google.auth.default()
-GOOGLE_APPLICATION_CREDENTIALS="C:/path/to/your/credentials.json"
-
-## Your Google Cloud project details
-VERTEX_PROJECT="documind-474412"
-VERTEX_LOCATION="us-central1"
-VERTEX_MODEL="gemini-2.0-flash-001"
-
-### 4. Run the Application
+**3. Create .env file**  
+Create a file named .env in the root of the project and add the variables listed in the "Configuration > For Local Development" section above.
 ```bash
 uvicorn main:app --reload
 ```
@@ -70,38 +84,32 @@ The application will start on http://localhost:8000.
 ## ► API Endpoint
 The API exposes a single endpoint for invoice extraction.
 
-URL: POST /invoices/extract
-Body: multipart/form-data
-
-Key: file
-
-Value: The (PDF, JPG, PNG) file to be analyzed.  
-Success Response (200 OK)
+URL: POST /invoices/extract  
+Body: multipart/form-data  
+Key: file  
+Value: The (PDF) file to be analyzed.  
+Note: The API is configured to only accept application/pdf file types.
 
 ```json
 {
-  "vendor": "Telenor Norge AS",
+  "vendor": "Telenor AS",
   "invoice_date": "2025-09-30",
-  "total_amount": 49.0,
+  "total_amount": 500.0,
   "currency": "NOK",
-  "invoice_number": "99166894",
+  "invoice_number": "991986894",
   "rawText": null
 }
 ```
-
-► Deployment (Vercel)
+## ► Deployment (Vercel)
 This project is configured for deployment on Vercel.
+
 Fork this repository.
 
-Create a new project on Vercel and connect it to your forked repository. Vercel will automatically detect the vercel.json file and deploy the FastAPI app.
-In the Vercel project settings, navigate to Environment Variables and add the following:
+Create a new project on Vercel and connect it to your forked repository. Vercel will automatically detect the vercel.json file.
 
-VERTEX_PROJECT: documind-474412  
-VERTEX_LOCATION: us-central1  
-VERTEX_MODEL: gemini-2.0-flash-001  
-GOOGLE_CREDENTIALS_JSON_CONTENT: (Crucial) Open your credentials.json file, copy its entire content (the full JSON object), and paste it as the value for this variable.
+In the Vercel project settings, navigate to Settings > Environment Variables and add all the variables listed in the "Configuration > For Production Deployment" section above.
 
-Finally, add your frontend's Vercel URL (e.g., https://documind-frontend.vercel.app) to the origins list in main.py and redeploy.
+Deploy the project.
 
 👤 Author
 Claudio Rodriguez
