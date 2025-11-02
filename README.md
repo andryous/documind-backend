@@ -62,7 +62,7 @@ A Google Cloud Service Account credentials.json file (see Configuration above).
 **2. Clone and Install Dependencies**
 ```bash
 # Clone the repository
-git clone [https://github.com/andryous/documind-backend.git](https://github.com/andryous/documind-backend.git)
+git clone [https://github.com/andryous/documind-backend.git]
 cd documind-backend
 
 # (Recommended) Create and activate a virtual environment
