@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import base64  # Handles Base64 decoding for production credentials
 from datetime import date
 from typing import Optional, List, Dict, Any
 
@@ -26,9 +27,10 @@ MODEL_NAME = os.getenv("VERTEX_MODEL", os.getenv("MODEL_NAME", "gemini-2.0-flash
 GOOGLE_CREDENTIALS_JSON_CONTENT = os.getenv("GOOGLE_CREDENTIALS_JSON_CONTENT")
 FRONTEND_URL = os.getenv("FRONTEND_URL")
 
-app = FastAPI(title="DocuMind – Vertex AI Diagnostics (REST)")  # We can change this title later
+app = FastAPI(title="DocuMind – Vertex AI Diagnostics (REST)")
 
 # ---------- CORS MIDDLEWARE CONFIGURATION ----------
+# A list of allowed origins for CORS.
 origins = [
     "http://localhost:5173",
 ]
@@ -39,8 +41,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # Allow all methods.
+    allow_headers=["*"],  # Allow all headers.
 )
 
 
@@ -50,20 +52,23 @@ app.add_middleware(
 def _get_credentials():
     """
     Get Google credentials.
-    In production (Vercel), read from GOOGLE_CREDENTIALS_JSON_CONTENT.
+    In production (Vercel), read and decode from GOOGLE_CREDENTIALS_JSON_CONTENT.
     In development (local), use the GOOGLE_APPLICATION_CREDENTIALS file path.
     """
     if GOOGLE_CREDENTIALS_JSON_CONTENT:
         # Running in production (Vercel)
         try:
-            creds_info = json.loads(GOOGLE_CREDENTIALS_JSON_CONTENT)
+            # Decode the Base64 string back into the original JSON text
+            decoded_json = base64.b64decode(GOOGLE_CREDENTIALS_JSON_CONTENT).decode("utf-8")
+            creds_info = json.loads(decoded_json)
             return service_account.Credentials.from_service_account_info(creds_info)
         except Exception as e:
-            print(f"Error loading credentials from env var: {e}")
+            print(f"Error loading credentials from Base64 env var: {e}")
             return None
     else:
         # Running locally
         try:
+            # google.auth.default() will automatically use the GOOGLE_APPLICATION_CREDENTIALS path
             creds, _ = google.auth.default()
             return creds
         except Exception as e:
@@ -73,20 +78,24 @@ def _get_credentials():
 
 # ------------------------------------
 
+
 # ---------- HELPERS ----------
-# ... (All helper functions: _get_authorized_session, _safe_text, _first_json_object, etc.
-# ... remain exactly the same) ...
 def _get_authorized_session():
+    """Create an AuthorizedSession using the unified credentials helper."""
     scopes = ["https://www.googleapis.com/auth/cloud-platform"]
     creds = _get_credentials()
+
+    # The scopes must be added to the credentials
     if creds and hasattr(creds, "with_scopes"):
         creds = creds.with_scopes(scopes)
+
     if not creds:
         raise HTTPException(status_code=500, detail="Could not load Google credentials")
     return AuthorizedSession(creds)
 
 
 def _safe_text(resp):
+    """Return JSON body if possible, otherwise raw text."""
     try:
         return resp.json()
     except Exception:
@@ -97,6 +106,7 @@ def _safe_text(resp):
 
 
 def _first_json_object(s: str) -> Optional[str]:
+    """Extract first top-level {...} JSON object; tolerates ```json fences or 'json' prefix."""
     if not s:
         return None
     t = s.strip()
@@ -117,6 +127,7 @@ def _first_json_object(s: str) -> Optional[str]:
 
 
 def _coerce_amount(v) -> Optional[float]:
+    """Normalize numbers like '49,00' → 49.0."""
     if v is None:
         return None
     if isinstance(v, (int, float)):
@@ -131,6 +142,7 @@ def _coerce_amount(v) -> Optional[float]:
 
 
 def _coerce_date_yyyy_mm_dd(s: Optional[str]) -> Optional[date]:
+    """Accept 'dd.mm.yyyy' or 'yyyy-mm-dd' and return date."""
     if not s or not isinstance(s, str):
         return None
     t = s.strip()
@@ -159,8 +171,6 @@ class InvoiceExtraction(BaseModel):
 
 
 # ---------- DIAGNOSTIC ENDPOINTS ----------
-# ... (All diagnostic endpoints: /health, /whoami, /check-model, etc.
-# ... remain exactly the same) ...
 @app.get("/health")
 def health():
     return {"project": PROJECT_ID, "location": LOCATION, "model": MODEL_NAME}
@@ -180,28 +190,44 @@ def whoami():
 def check_model():
     session = _get_authorized_session()
     url = (
-        f"https://{LOCATION}[-aiplatform.googleapis.com/v1/](https://-aiplatform.googleapis.com/v1/)"
+        f"https://{LOCATION}-aiplatform.googleapis.com/v1/"
         f"projects/{PROJECT_ID}/locations/{LOCATION}/publishers/google/models/{MODEL_NAME}"
     )
     resp = session.get(url)
     if resp.status_code == 200:
         data = resp.json()
         return {"found": True, "display_name": data.get("displayName"), "name": data.get("name"), "raw": data}
-    # ... (error handling 404, 403, 500 remains the same) ...
     if resp.status_code == 404:
-        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "message": "..."}, )
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "NOT_FOUND",
+                "message": "Publisher model not found or project lacks access in this region.",
+                "url": url,
+                "response": _safe_text(resp),
+            },
+        )
     if resp.status_code == 403:
-        raise HTTPException(status_code=403, detail={"error": "PERMISSION_DENIED", "message": "..."}, )
-    raise HTTPException(status_code=500, detail={"error": "UPSTREAM_ERROR", "status_code": resp.status_code, "url": url,
-                                                 "response": _safe_text(resp)}, )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "PERMISSION_DENIED",
+                "message": "Permission denied. Ensure roles/aiplatform.user on the Service Account.",
+                "url": url,
+                "response": _safe_text(resp),
+            },
+        )
+    raise HTTPException(
+        status_code=500,
+        detail={"error": "UPSTREAM_ERROR", "status_code": resp.status_code, "url": url, "response": _safe_text(resp)},
+    )
 
 
 @app.get("/list-models")
-def list_models(prefix: Optional[str] = Query("gemini")):
-    # ... (function content remains the same) ...
+def list_models(prefix: Optional[str] = Query("gemini", description="Filter by name/displayName prefix")):
     session = _get_authorized_session()
     base = (
-        f"https://{LOCATION}[-aiplatform.googleapis.com/v1/projects/](https://-aiplatform.googleapis.com/v1/projects/){PROJECT_ID}/locations/{LOCATION}/publishers/google/models")
+        f"https://{LOCATION}-aiplatform.googleapis.com/v1/projects/{PROJECT_ID}/locations/{LOCATION}/publishers/google/models")
     page_token: Optional[str] = None
     seen: List[Dict[str, Any]] = []
     while True:
@@ -224,7 +250,6 @@ def list_models(prefix: Optional[str] = Query("gemini")):
 
 @app.get("/ping-model")
 def ping_model():
-    # ... (function content remains the same) ...
     try:
         creds = _get_credentials()
         if not creds:
@@ -234,14 +259,14 @@ def ping_model():
         result = model.generate_content("Say 'pong' in one word.")
         return {"reply": getattr(result, "text", None)}
     except gax.NotFound as e:
-        raise HTTPException(status_code=404, detail={"error": "NOT_FOUND", "detail": str(e)})
+        raise HTTPException(status_code=44, detail={"error": "NOT_FOUND", "detail": str(e)})
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": type(e).__name__, "detail": str(e)})
 
 
 # ---------- BUSINESS ENDPOINT ----------
 
-# The "Whitelist" is now only for PDF.
+# Whitelist for supported MIME types.
 SUPPORTED_MIME_TYPE = "application/pdf"
 
 
@@ -279,7 +304,7 @@ async def extract_invoice(file: UploadFile = File(...)):
 
     cfg = GenerationConfig(response_mime_type="application/json")
 
-    text = ""  # Initialize text variable
+    text = ""  # Initialize text variable to ensure it exists
     try:
         print("--- Attempting to call model.generate_content ---")
         try:
@@ -290,22 +315,26 @@ async def extract_invoice(file: UploadFile = File(...)):
             print(f"!!! GEMINI CALL FAILED: {type(e).__name__} - {e}")
             raise
 
-        # ... (The rest of the JSON parsing logic remains the same) ...
+        # Try direct JSON parsing
         data: Any
         try:
             data = json.loads(text)
         except Exception:
+            # Fallback to finding the first JSON object
             obj = _first_json_object(text)
             if not obj:
                 return InvoiceExtraction(rawText=text)
             data = json.loads(obj)
 
+        # If model returned a list, take the first dict
         if isinstance(data, list):
             data = data[0] if data else {}
 
+        # Ensure all required keys exist
         for k in ["vendor", "invoice_date", "total_amount", "currency", "invoice_number"]:
             data.setdefault(k, None)
 
+        # Coerce fields to their correct types
         data["total_amount"] = _coerce_amount(data.get("total_amount"))
         data["invoice_date"] = _coerce_date_yyyy_mm_dd(data.get("invoice_date"))
 
@@ -320,6 +349,7 @@ async def extract_invoice(file: UploadFile = File(...)):
 
 
 # ---------- MAIN ----------
+# This block is for local development and will be ignored by Vercel.
 if __name__ == "__main__":
     import uvicorn
 
